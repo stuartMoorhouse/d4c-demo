@@ -1,0 +1,121 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: elastic-agent
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: elastic-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces", "events", "services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments", "replicasets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/stats", "nodes/metrics", "nodes/proxy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: elastic-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: elastic-agent
+subjects:
+  - kind: ServiceAccount
+    name: elastic-agent
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: elastic-agent
+  namespace: kube-system
+  labels:
+    app: elastic-agent
+spec:
+  selector:
+    matchLabels:
+      app: elastic-agent
+  template:
+    metadata:
+      labels:
+        app: elastic-agent
+    spec:
+      serviceAccountName: elastic-agent
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      securityContext:
+        runAsUser: 0
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: elastic-agent
+          image: docker.elastic.co/beats/elastic-agent:ELASTIC_VERSION_PLACEHOLDER
+          securityContext:
+            privileged: true
+          env:
+            - name: FLEET_URL
+              value: "FLEET_URL_PLACEHOLDER"
+            - name: FLEET_ENROLLMENT_TOKEN
+              value: "FLEET_ENROLLMENT_TOKEN_PLACEHOLDER"
+            - name: FLEET_ENROLL
+              value: "1"
+            - name: FLEET_INSECURE
+              value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 400Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: containerd-sock
+              mountPath: /run/containerd/containerd.sock
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+              readOnly: true
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+            - name: proc
+              mountPath: /proc
+              readOnly: true
+            - name: sys-fs-bpf
+              mountPath: /sys/fs/bpf
+            - name: sys-kernel-debug
+              mountPath: /sys/kernel/debug
+      volumes:
+        - name: containerd-sock
+          hostPath:
+            path: /run/containerd/containerd.sock
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys-fs-bpf
+          hostPath:
+            path: /sys/fs/bpf
+        - name: sys-kernel-debug
+          hostPath:
+            path: /sys/kernel/debug
