@@ -50,51 +50,58 @@ SSH_KEY="${PROJECT_DIR}/d4c2-key.pem"
 print_info "Kibana:  $KIBANA_URL"
 print_info "Control: $CONTROL_IP"
 
-RULE_NAME="Crypto Miner Detected (xmrig in /tmp)"
+RULE_NAME_CRYPTO="Crypto Miner Detected (xmrig in /tmp)"
+RULE_NAME_NODE="Container Breakout via nsenter (Node-Level Escape)"
 
 ################################################################################
 # STEP 2: Clean up K8s attack job
 ################################################################################
 
-print_phase "STEP 2: Cleaning up crypto miner job"
+print_phase "STEP 2: Cleaning up attack jobs"
 
 ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ubuntu@${CONTROL_IP} \
-    "kubectl delete job crypto-miner-sim --ignore-not-found=true" 2>&1 || true
-print_info "Attack job cleaned up."
+    "kubectl delete job crypto-miner-sim node-breakout-sim --ignore-not-found=true" 2>&1 || true
+print_info "Attack jobs cleaned up."
 
 ################################################################################
 # STEP 3: Disable detection rule (MUST happen before deleting alerts,
 #          otherwise the still-running rule re-fires and recreates them)
 ################################################################################
 
-print_phase "STEP 3: Disabling detection rule"
+print_phase "STEP 3: Disabling detection rules"
 
-RULE_INTERNAL_ID=$(curl -s \
+# Fetch all rules once
+ALL_RULES=$(curl -s \
     -u "elastic:${ES_PASSWORD}" \
     -H "kbn-xsrf: true" \
     -H "elastic-api-version: 2023-10-31" \
-    "${KIBANA_URL}/api/detection_engine/rules/_find?per_page=100" 2>/dev/null \
-    | jq -r ".data[] | select(.name==\"${RULE_NAME}\") | .id" 2>/dev/null)
+    "${KIBANA_URL}/api/detection_engine/rules/_find?per_page=100" 2>/dev/null)
 
-if [ -n "$RULE_INTERNAL_ID" ]; then
-    print_info "Disabling detection rule '${RULE_NAME}'..."
-    curl -s \
-        -u "elastic:${ES_PASSWORD}" \
-        -X PATCH \
-        -H "kbn-xsrf: true" \
-        -H "elastic-api-version: 2023-10-31" \
-        -H "Content-Type: application/json" \
-        "${KIBANA_URL}/api/detection_engine/rules" \
-        -d "{\"id\": \"${RULE_INTERNAL_ID}\", \"enabled\": false}" > /dev/null 2>&1
+RULE_ID_CRYPTO=$(echo "$ALL_RULES" | jq -r ".data[] | select(.name==\"${RULE_NAME_CRYPTO}\") | .id" 2>/dev/null)
+RULE_ID_NODE=$(echo "$ALL_RULES" | jq -r ".data[] | select(.name==\"${RULE_NAME_NODE}\") | .id" 2>/dev/null)
 
-    # Wait for the rule's current execution interval to complete
-    print_info "Waiting for rule execution interval to drain..."
-    sleep 5
+for RULE_PAIR in "${RULE_NAME_CRYPTO}|${RULE_ID_CRYPTO}" "${RULE_NAME_NODE}|${RULE_ID_NODE}"; do
+    RNAME="${RULE_PAIR%%|*}"
+    RID="${RULE_PAIR##*|}"
+    if [ -n "$RID" ] && [ "$RID" != "null" ]; then
+        print_info "Disabling detection rule '${RNAME}'..."
+        curl -s \
+            -u "elastic:${ES_PASSWORD}" \
+            -X PATCH \
+            -H "kbn-xsrf: true" \
+            -H "elastic-api-version: 2023-10-31" \
+            -H "Content-Type: application/json" \
+            "${KIBANA_URL}/api/detection_engine/rules" \
+            -d "{\"id\": \"${RID}\", \"enabled\": false}" > /dev/null 2>&1
+        print_info "Disabled '${RNAME}'."
+    else
+        print_warn "Detection rule '${RNAME}' not found — skipping."
+    fi
+done
 
-    print_info "Detection rule disabled."
-else
-    print_warn "Detection rule '${RULE_NAME}' not found — skipping."
-fi
+# Wait for rule execution intervals to drain
+print_info "Waiting for rule execution intervals to drain..."
+sleep 5
 
 ################################################################################
 # STEP 4: Delete Elastic Security alerts (rule is now disabled so they
@@ -103,7 +110,7 @@ fi
 
 print_phase "STEP 4: Clearing Elastic Security alerts"
 
-print_info "Deleting alerts for rule '${RULE_NAME}'..."
+print_info "Deleting alerts for all demo rules..."
 DELETE_RESPONSE=$(curl -s \
     -u "elastic:${ES_PASSWORD}" \
     -X POST \
@@ -111,8 +118,12 @@ DELETE_RESPONSE=$(curl -s \
     "${ES_URL}/.alerts-security.alerts-default/_delete_by_query?refresh=true" \
     -d "{
         \"query\": {
-            \"term\": {
-                \"kibana.alert.rule.name\": \"${RULE_NAME}\"
+            \"bool\": {
+                \"should\": [
+                    {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_CRYPTO}\"}},
+                    {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_NODE}\"}}
+                ],
+                \"minimum_should_match\": 1
             }
         }
     }" 2>&1)
@@ -136,7 +147,13 @@ elif echo "$DELETE_RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
             \"query\": {
                 \"bool\": {
                     \"filter\": [
-                        {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME}\"}}
+                        {\"bool\": {
+                            \"should\": [
+                                {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_CRYPTO}\"}},
+                                {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_NODE}\"}}
+                            ],
+                            \"minimum_should_match\": 1
+                        }}
                     ]
                 }
             },
@@ -158,21 +175,24 @@ fi
 
 print_phase "STEP 5: Re-enabling detection rule"
 
-if [ -n "$RULE_INTERNAL_ID" ]; then
-    print_info "Re-enabling detection rule..."
-    curl -s \
-        -u "elastic:${ES_PASSWORD}" \
-        -X PATCH \
-        -H "kbn-xsrf: true" \
-        -H "elastic-api-version: 2023-10-31" \
-        -H "Content-Type: application/json" \
-        "${KIBANA_URL}/api/detection_engine/rules" \
-        -d "{\"id\": \"${RULE_INTERNAL_ID}\", \"enabled\": true}" > /dev/null 2>&1
-
-    print_info "Detection rule re-enabled (suppression window reset)."
-else
-    print_warn "No rule to re-enable — skipping."
-fi
+for RULE_PAIR in "${RULE_NAME_CRYPTO}|${RULE_ID_CRYPTO}" "${RULE_NAME_NODE}|${RULE_ID_NODE}"; do
+    RNAME="${RULE_PAIR%%|*}"
+    RID="${RULE_PAIR##*|}"
+    if [ -n "$RID" ] && [ "$RID" != "null" ]; then
+        print_info "Re-enabling '${RNAME}'..."
+        curl -s \
+            -u "elastic:${ES_PASSWORD}" \
+            -X PATCH \
+            -H "kbn-xsrf: true" \
+            -H "elastic-api-version: 2023-10-31" \
+            -H "Content-Type: application/json" \
+            "${KIBANA_URL}/api/detection_engine/rules" \
+            -d "{\"id\": \"${RID}\", \"enabled\": true}" > /dev/null 2>&1
+        print_info "Re-enabled '${RNAME}' (suppression window reset)."
+    else
+        print_warn "No rule '${RNAME}' to re-enable — skipping."
+    fi
+done
 
 ################################################################################
 # STEP 6: Delete Elastic Security cases
@@ -251,7 +271,8 @@ print_phase "Demo Reset Complete"
 
 print_info "Environment is ready for the next demo run."
 echo ""
-print_info "Run the attack with:"
+print_info "Run the attacks with:"
 echo ""
-echo "  ./scripts/attack.sh"
+echo "  ./scripts/attack.sh         # Container-level: crypto miner"
+echo "  ./scripts/attack-node.sh    # Node-level: container breakout via nsenter"
 echo ""
