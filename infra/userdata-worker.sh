@@ -44,8 +44,10 @@ apt-get update
 apt-get install -y kubelet kubeadm kubectl
 apt-mark hold kubelet kubeadm kubectl
 
-# Wait for join command from control plane via SSM
+# Wait for join command from control plane via SSM (timeout after 10 minutes)
 echo "Waiting for control plane join command..."
+MAX_WAIT=600
+WAITED=0
 while true; do
   JOIN_CMD=$(aws ssm get-parameter \
     --name "${ssm_param}" \
@@ -56,9 +58,23 @@ while true; do
     echo "Got join command"
     break
   fi
-  echo "  Still waiting..."
+  if [[ $WAITED -ge $MAX_WAIT ]]; then
+    echo "FATAL: Timed out waiting for join command after $${MAX_WAIT}s"
+    exit 1
+  fi
+  echo "  Still waiting... ($${WAITED}s / $${MAX_WAIT}s)"
   sleep 15
+  WAITED=$((WAITED + 15))
 done
+
+# Verify API server is healthy before joining
+echo "Verifying API server health..."
+CONTROL_IP="${control_plane_ip}"
+until curl -sk --max-time 5 "https://$CONTROL_IP:6443/healthz" | grep -q ok; do
+  echo "  API server not ready yet..."
+  sleep 10
+done
+echo "API server is healthy"
 
 # Join the cluster
 $JOIN_CMD

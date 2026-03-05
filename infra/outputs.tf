@@ -31,3 +31,11 @@ output "elasticsearch_password" {
 output "elastic_version" {
   value = data.ec_stack.latest.version
 }
+
+output "region" {
+  value = var.region
+}
+
+output "prefix" {
+  value = var.prefix
+}

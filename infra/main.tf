@@ -13,6 +13,10 @@ terraform {
       source  = "hashicorp/tls"
       version = "~> 4.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -183,7 +187,10 @@ resource "aws_iam_role_policy" "ssm_access" {
         "ssm:GetParameter",
         "ssm:PutParameter"
       ]
-      Resource = aws_ssm_parameter.join_cmd.arn
+      Resource = [
+        aws_ssm_parameter.join_cmd.arn,
+        aws_ssm_parameter.kubeconfig.arn
+      ]
     }]
   })
 }
@@ -199,10 +206,12 @@ resource "aws_ssm_parameter" "join_cmd" {
   name  = "/${var.prefix}/join-command"
   type  = "String"
   value = "pending"
+}
 
-  lifecycle {
-    ignore_changes = [value]
-  }
+resource "aws_ssm_parameter" "kubeconfig" {
+  name  = "/${var.prefix}/kubeconfig"
+  type  = "SecureString"
+  value = "pending"
 }
 
 # ---------- EC2 Spot Instances ----------
@@ -218,9 +227,10 @@ resource "aws_spot_instance_request" "control" {
   iam_instance_profile   = aws_iam_instance_profile.k8s_node.name
 
   user_data = templatefile("${path.module}/userdata-control.sh", {
-    ssm_param = aws_ssm_parameter.join_cmd.name
-    region    = var.region
-    pod_cidr  = "10.244.0.0/16"
+    ssm_param      = aws_ssm_parameter.join_cmd.name
+    ssm_kubeconfig = aws_ssm_parameter.kubeconfig.name
+    region         = var.region
+    pod_cidr       = "10.244.0.0/16"
   })
 
   root_block_device {
@@ -283,4 +293,77 @@ resource "ec_deployment" "this" {
     zone_count = 1
   }
 
+}
+
+# ---------- Automated Fleet Setup ----------
+
+resource "null_resource" "wait_for_cluster" {
+  depends_on = [
+    aws_spot_instance_request.control,
+    aws_spot_instance_request.worker,
+    ec_deployment.this,
+  ]
+
+  # Re-run if any instance changes
+  triggers = {
+    control_id = aws_spot_instance_request.control.id
+    worker_ids = join(",", aws_spot_instance_request.worker[*].id)
+    elastic_id = ec_deployment.this.id
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+
+      echo "Waiting for kubeconfig to appear in SSM..."
+      MAX_WAIT=600
+      WAITED=0
+      while true; do
+        KUBECONFIG_VAL=$(aws ssm get-parameter \
+          --name "/${var.prefix}/kubeconfig" \
+          --with-decryption \
+          --region ${var.region} \
+          --profile company \
+          --query 'Parameter.Value' \
+          --output text 2>/dev/null || echo "pending")
+        if [[ "$KUBECONFIG_VAL" != "pending" && -n "$KUBECONFIG_VAL" ]]; then
+          echo "Kubeconfig available"
+          break
+        fi
+        if [[ $WAITED -ge $MAX_WAIT ]]; then
+          echo "FATAL: Timed out waiting for kubeconfig after $${MAX_WAIT}s"
+          exit 1
+        fi
+        echo "  Still waiting... ($${WAITED}s / $${MAX_WAIT}s)"
+        sleep 15
+        WAITED=$((WAITED + 15))
+      done
+
+      # Write kubeconfig to temp file
+      KUBECONFIG_FILE=$(mktemp)
+      echo "$KUBECONFIG_VAL" > "$KUBECONFIG_FILE"
+
+      # Verify cluster is healthy via kubectl
+      echo "Verifying cluster health..."
+      for i in $(seq 1 30); do
+        if KUBECONFIG="$KUBECONFIG_FILE" kubectl get nodes 2>/dev/null | grep -q Ready; then
+          echo "Cluster has Ready nodes"
+          break
+        fi
+        if [[ "$i" == "30" ]]; then
+          echo "FATAL: Cluster not healthy after 5 minutes"
+          rm -f "$KUBECONFIG_FILE"
+          exit 1
+        fi
+        echo "  Attempt $i/30..."
+        sleep 10
+      done
+
+      rm -f "$KUBECONFIG_FILE"
+
+      # Run Fleet setup
+      echo "Running Fleet setup..."
+      bash ${path.module}/../scripts/setup-fleet.sh
+    EOT
+  }
 }

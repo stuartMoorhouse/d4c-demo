@@ -46,9 +46,11 @@ apt-mark hold kubelet kubeadm kubectl
 
 # Init control plane
 PRIVATE_IP=$(hostname -I | awk '{print $1}')
+PUBLIC_IP=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4)
 kubeadm init \
   --pod-network-cidr=${pod_cidr} \
-  --apiserver-advertise-address="$PRIVATE_IP"
+  --apiserver-advertise-address="$PRIVATE_IP" \
+  --apiserver-cert-extra-sans="$PUBLIC_IP"
 
 # Setup kubeconfig for root
 mkdir -p /root/.kube
@@ -69,6 +71,15 @@ aws ssm put-parameter \
   --name "${ssm_param}" \
   --value "$JOIN_CMD" \
   --type String \
+  --overwrite \
+  --region ${region}
+
+# Publish kubeconfig to SSM (rewrite server to public IP for external access)
+KUBECONFIG_CONTENT=$(cat /etc/kubernetes/admin.conf | sed "s|$PRIVATE_IP|$PUBLIC_IP|g")
+aws ssm put-parameter \
+  --name "${ssm_kubeconfig}" \
+  --value "$KUBECONFIG_CONTENT" \
+  --type SecureString \
   --overwrite \
   --region ${region}
 

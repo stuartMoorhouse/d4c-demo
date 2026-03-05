@@ -6,12 +6,24 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 KIBANA_URL=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw kibana_url)
 ES_PASSWORD=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elasticsearch_password)
-CONTROL_IP=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw control_plane_public_ip)
 ES_VERSION=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elastic_version)
-SSH_KEY="${PROJECT_DIR}/d4c2-key.pem"
+REGION=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw region 2>/dev/null || echo "eu-north-1")
+PREFIX=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw prefix 2>/dev/null || echo "d4c2")
+
+# Fetch kubeconfig from SSM
+echo "Fetching kubeconfig from SSM..."
+KUBECONFIG_FILE=$(mktemp)
+aws ssm get-parameter \
+  --name "/${PREFIX}/kubeconfig" \
+  --with-decryption \
+  --region "$REGION" \
+  --profile company \
+  --query 'Parameter.Value' \
+  --output text > "$KUBECONFIG_FILE"
+export KUBECONFIG="$KUBECONFIG_FILE"
+trap 'rm -f "$KUBECONFIG_FILE"' EXIT
 
 echo "Kibana:  $KIBANA_URL"
-echo "Control: $CONTROL_IP"
 echo "Version: $ES_VERSION"
 
 # Wait for Kibana to be ready
@@ -118,17 +130,12 @@ sed -e "s|FLEET_URL_PLACEHOLDER|${FLEET_URL}|g" \
     -e "s|ELASTIC_VERSION_PLACEHOLDER|${ES_VERSION}|g" \
     "${PROJECT_DIR}/manifests/elastic-agent.yaml" > /tmp/elastic-agent-rendered.yaml
 
-scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
-  /tmp/elastic-agent-rendered.yaml ubuntu@${CONTROL_IP}:/tmp/elastic-agent.yaml
-
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ubuntu@${CONTROL_IP} \
-  "kubectl apply -f /tmp/elastic-agent.yaml"
+kubectl apply -f /tmp/elastic-agent-rendered.yaml
 
 # Wait for rollout
 echo ""
 echo "Waiting for Elastic Agent rollout..."
-ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ubuntu@${CONTROL_IP} \
-  "kubectl -n kube-system rollout status daemonset/elastic-agent --timeout=120s"
+kubectl -n kube-system rollout status daemonset/elastic-agent --timeout=120s
 
 # Update shared state
 cat > "${PROJECT_DIR}/shared/env.json" <<ENVEOF
