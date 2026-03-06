@@ -46,8 +46,8 @@ done
 # Get Fleet Server URL from Fleet settings
 echo ""
 echo "Getting Fleet Server URL..."
-FLEET_URL=$(curl -s -u "elastic:${ES_PASSWORD}" "${KIBANA_URL}/api/fleet/settings" \
-  -H "kbn-xsrf: true" | jq -r '.item.fleet_server_hosts[0]')
+FLEET_URL=$(curl -s -u "elastic:${ES_PASSWORD}" "${KIBANA_URL}/api/fleet/fleet_server_hosts" \
+  -H "kbn-xsrf: true" | jq -r '.items[] | select(.is_default == true) | .host_urls[0]')
 echo "Fleet:   $FLEET_URL"
 
 if [[ -z "$FLEET_URL" || "$FLEET_URL" == "null" ]]; then
@@ -55,7 +55,7 @@ if [[ -z "$FLEET_URL" || "$FLEET_URL" == "null" ]]; then
   exit 1
 fi
 
-# Create Agent Policy
+# Create Agent Policy (idempotent — reuse existing if present)
 echo ""
 echo "Creating agent policy..."
 POLICY_RESPONSE=$(curl -s -X POST "${KIBANA_URL}/api/fleet/agent_policies" \
@@ -70,11 +70,26 @@ POLICY_RESPONSE=$(curl -s -X POST "${KIBANA_URL}/api/fleet/agent_policies" \
 POLICY_ID=$(echo "$POLICY_RESPONSE" | jq -r '.item.id')
 
 if [[ -z "$POLICY_ID" || "$POLICY_ID" == "null" ]]; then
-  echo "ERROR: Failed to create agent policy"
-  echo "$POLICY_RESPONSE" | jq .
-  exit 1
+  # Check if policy already exists (409 Conflict)
+  STATUS_CODE=$(echo "$POLICY_RESPONSE" | jq -r '.statusCode // empty')
+  if [[ "$STATUS_CODE" == "409" ]]; then
+    echo "Agent policy already exists, looking it up..."
+    POLICY_ID=$(curl -s -u "elastic:${ES_PASSWORD}" \
+      "${KIBANA_URL}/api/fleet/agent_policies" \
+      -H "kbn-xsrf: true" | jq -r '.items[] | select(.name == "d4c2-policy") | .id')
+    if [[ -z "$POLICY_ID" || "$POLICY_ID" == "null" ]]; then
+      echo "ERROR: Could not find existing d4c2-policy"
+      exit 1
+    fi
+    echo "Using existing agent policy: $POLICY_ID"
+  else
+    echo "ERROR: Failed to create agent policy"
+    echo "$POLICY_RESPONSE" | jq .
+    exit 1
+  fi
+else
+  echo "Created agent policy: $POLICY_ID"
 fi
-echo "Created agent policy: $POLICY_ID"
 
 # Get D4C package version
 echo ""
@@ -84,30 +99,69 @@ D4C_VERSION=$(curl -s -u "elastic:${ES_PASSWORD}" \
   -H "kbn-xsrf: true" | jq -r '.item.version')
 echo "D4C package version: $D4C_VERSION"
 
-# Add D4C integration to policy
+# Add D4C integration to policy (idempotent — skip if already attached)
 echo ""
 echo "Adding Defend for Containers integration..."
-D4C_RESPONSE=$(curl -s -X POST "${KIBANA_URL}/api/fleet/package_policies" \
-  -H "kbn-xsrf: true" \
-  -H "Content-Type: application/json" \
-  -u "elastic:${ES_PASSWORD}" \
-  -d "{
-    \"name\": \"d4c2-defend-for-containers\",
-    \"namespace\": \"default\",
-    \"policy_id\": \"${POLICY_ID}\",
-    \"package\": {
-      \"name\": \"cloud_defend\",
-      \"version\": \"${D4C_VERSION}\"
-    }
-  }")
+EXISTING_D4C=$(curl -s -u "elastic:${ES_PASSWORD}" \
+  "${KIBANA_URL}/api/fleet/package_policies" \
+  -H "kbn-xsrf: true" | jq -r ".items[] | select(.policy_id == \"${POLICY_ID}\" and .package.name == \"cloud_defend\") | .id")
 
-D4C_POLICY_ID=$(echo "$D4C_RESPONSE" | jq -r '.item.id')
-if [[ -z "$D4C_POLICY_ID" || "$D4C_POLICY_ID" == "null" ]]; then
-  echo "ERROR: Failed to add D4C integration"
-  echo "$D4C_RESPONSE" | jq .
-  exit 1
+if [[ -n "$EXISTING_D4C" && "$EXISTING_D4C" != "null" ]]; then
+  echo "D4C integration already attached: $EXISTING_D4C"
+  D4C_POLICY_ID="$EXISTING_D4C"
+else
+  # Explicit D4C configuration with process + file monitoring
+  D4C_CONFIG=$(cat <<'YAMLEOF'
+process:
+  selectors:
+    - name: allProcesses
+      operation: [fork, exec]
+  responses:
+    - match: [allProcesses]
+      actions: [log]
+file:
+  selectors:
+    - name: executableChanges
+      operation: [createExecutable, modifyExecutable]
+  responses:
+    - match: [executableChanges]
+      actions: [alert]
+YAMLEOF
+)
+
+  D4C_RESPONSE=$(curl -s -X POST "${KIBANA_URL}/api/fleet/package_policies" \
+    -H "kbn-xsrf: true" \
+    -H "Content-Type: application/json" \
+    -u "elastic:${ES_PASSWORD}" \
+    -d "$(jq -n \
+      --arg name "d4c2-defend-for-containers" \
+      --arg ns "default" \
+      --arg pid "${POLICY_ID}" \
+      --arg pkg_name "cloud_defend" \
+      --arg pkg_ver "${D4C_VERSION}" \
+      --arg config "$D4C_CONFIG" \
+      '{
+        name: $name,
+        namespace: $ns,
+        policy_id: $pid,
+        package: { name: $pkg_name, version: $pkg_ver },
+        inputs: {
+          "cloud_defend-control": {
+            vars: {
+              configuration: $config
+            }
+          }
+        }
+      }')")
+
+  D4C_POLICY_ID=$(echo "$D4C_RESPONSE" | jq -r '.item.id')
+  if [[ -z "$D4C_POLICY_ID" || "$D4C_POLICY_ID" == "null" ]]; then
+    echo "ERROR: Failed to add D4C integration"
+    echo "$D4C_RESPONSE" | jq .
+    exit 1
+  fi
+  echo "Added D4C integration: $D4C_POLICY_ID"
 fi
-echo "Added D4C integration: $D4C_POLICY_ID"
 
 # Get enrollment token
 echo ""

@@ -80,6 +80,7 @@ aws ssm put-parameter \
   --name "${ssm_kubeconfig}" \
   --value "$KUBECONFIG_CONTENT" \
   --type SecureString \
+  --tier Advanced \
   --overwrite \
   --region ${region}
 

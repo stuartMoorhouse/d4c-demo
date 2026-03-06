@@ -57,7 +57,7 @@ data "aws_ami" "ubuntu" {
 }
 
 data "ec_stack" "latest" {
-  version_regex = "8\\.\\d+\\.\\d+"
+  version_regex = "9\\.3\\.\\d+"
   region        = "aws-eu-north-1"
 }
 
@@ -206,21 +206,28 @@ resource "aws_ssm_parameter" "join_cmd" {
   name  = "/${var.prefix}/join-command"
   type  = "String"
   value = "pending"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
 resource "aws_ssm_parameter" "kubeconfig" {
   name  = "/${var.prefix}/kubeconfig"
   type  = "SecureString"
+  tier  = "Advanced"
   value = "pending"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
-# ---------- EC2 Spot Instances ----------
+# ---------- EC2 Instances ----------
 
-resource "aws_spot_instance_request" "control" {
+resource "aws_instance" "control" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
-  spot_type              = "one-time"
-  wait_for_fulfillment   = true
   key_name               = aws_key_pair.this.key_name
   vpc_security_group_ids = [aws_security_group.k8s.id]
   subnet_id              = aws_subnet.public.id
@@ -241,13 +248,11 @@ resource "aws_spot_instance_request" "control" {
   tags = { Name = "${var.prefix}-control" }
 }
 
-resource "aws_spot_instance_request" "worker" {
+resource "aws_instance" "worker" {
   count = 2
 
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
-  spot_type              = "one-time"
-  wait_for_fulfillment   = true
   key_name               = aws_key_pair.this.key_name
   vpc_security_group_ids = [aws_security_group.k8s.id]
   subnet_id              = aws_subnet.public.id
@@ -256,7 +261,7 @@ resource "aws_spot_instance_request" "worker" {
   user_data = templatefile("${path.module}/userdata-worker.sh", {
     ssm_param        = aws_ssm_parameter.join_cmd.name
     region           = var.region
-    control_plane_ip = aws_spot_instance_request.control.private_ip
+    control_plane_ip = aws_instance.control.private_ip
   })
 
   root_block_device {
@@ -299,15 +304,15 @@ resource "ec_deployment" "this" {
 
 resource "null_resource" "wait_for_cluster" {
   depends_on = [
-    aws_spot_instance_request.control,
-    aws_spot_instance_request.worker,
+    aws_instance.control,
+    aws_instance.worker,
     ec_deployment.this,
   ]
 
   # Re-run if any instance changes
   triggers = {
-    control_id = aws_spot_instance_request.control.id
-    worker_ids = join(",", aws_spot_instance_request.worker[*].id)
+    control_id = aws_instance.control.id
+    worker_ids = join(",", aws_instance.worker[*].id)
     elastic_id = ec_deployment.this.id
   }
 

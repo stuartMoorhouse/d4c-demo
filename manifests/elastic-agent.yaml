@@ -60,7 +60,7 @@ spec:
         - operator: Exists
       containers:
         - name: elastic-agent
-          image: docker.elastic.co/beats/elastic-agent:ELASTIC_VERSION_PLACEHOLDER
+          image: docker.elastic.co/elastic-agent/elastic-agent:ELASTIC_VERSION_PLACEHOLDER
           securityContext:
             privileged: true
           env:

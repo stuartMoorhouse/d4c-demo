@@ -21,7 +21,7 @@ RULE_RESPONSE=$(curl -s -X POST "${KIBANA_URL}/api/detection_engine/rules" \
     "description": "Detects a container using nsenter to escape into the host node namespaces. This is a container breakout technique where a privileged pod with hostPID access uses nsenter to execute commands directly on the underlying Kubernetes node.",
     "risk_score": 99,
     "severity": "critical",
-    "query": "FROM logs-cloud_defend.process-* | WHERE process.name == \"nsenter\" AND process.args LIKE \"*--target*\"",
+    "query": "FROM logs-cloud_defend.process-* | WHERE process.name == \"nsenter\" | EVAL args_str = MV_CONCAT(process.args, \" \") | WHERE args_str LIKE \"*--target*\"",
     "interval": "5s",
     "from": "now-1m",
     "enabled": true,
