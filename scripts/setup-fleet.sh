@@ -4,11 +4,12 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-KIBANA_URL=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw kibana_url)
-ES_PASSWORD=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elasticsearch_password)
-ES_VERSION=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elastic_version)
-REGION=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw region 2>/dev/null || echo "eu-north-1")
-PREFIX=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw prefix 2>/dev/null || echo "d4c2")
+# Use env vars if set (from Terraform provisioner), otherwise fall back to terraform output
+KIBANA_URL="${KIBANA_URL:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw kibana_url)}"
+ES_PASSWORD="${ELASTICSEARCH_PASSWORD:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elasticsearch_password)}"
+ES_VERSION="${ELASTIC_VERSION:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elastic_version)}"
+REGION="${REGION:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw region 2>/dev/null || echo "eu-north-1")}"
+PREFIX="${PREFIX:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw prefix 2>/dev/null || echo "d4c2")}"
 
 # Fetch kubeconfig from SSM
 echo "Fetching kubeconfig from SSM..."
@@ -145,13 +146,15 @@ YAMLEOF
         namespace: $ns,
         policy_id: $pid,
         package: { name: $pkg_name, version: $pkg_ver },
-        inputs: {
-          "cloud_defend-control": {
+        inputs: [
+          {
+            type: "cloud_defend/control",
+            enabled: true,
             vars: {
-              configuration: $config
+              configuration: { value: $config, type: "yaml" }
             }
           }
-        }
+        ]
       }')")
 
   D4C_POLICY_ID=$(echo "$D4C_RESPONSE" | jq -r '.item.id')
@@ -194,7 +197,7 @@ kubectl -n kube-system rollout status daemonset/elastic-agent --timeout=120s
 # Update shared state
 cat > "${PROJECT_DIR}/shared/env.json" <<ENVEOF
 {
-  "elasticsearch_url": "$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elasticsearch_url)",
+  "elasticsearch_url": "${ELASTICSEARCH_URL:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elasticsearch_url 2>/dev/null)}",
   "kibana_url": "${KIBANA_URL}",
   "fleet_url": "${FLEET_URL}",
   "api_key": "",

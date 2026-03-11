@@ -86,7 +86,10 @@ resource "aws_vpc" "this" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 
-  tags = { Name = "${var.prefix}-vpc" }
+  tags = {
+    Name             = "${var.prefix}-vpc"
+    GuardDutyManaged = "false"
+  }
 }
 
 resource "aws_subnet" "public" {
@@ -275,7 +278,7 @@ resource "aws_instance" "worker" {
 # ---------- Elastic Cloud ----------
 
 resource "ec_deployment" "this" {
-  name                   = "${var.prefix}-elastic"
+  name                   = "d4c-test"
   region                 = "aws-eu-north-1"
   version                = data.ec_stack.latest.version
   deployment_template_id = "aws-general-purpose-faster-warm"
@@ -370,5 +373,14 @@ resource "null_resource" "wait_for_cluster" {
       echo "Running Fleet setup..."
       bash ${path.module}/../scripts/setup-fleet.sh
     EOT
+
+    environment = {
+      KIBANA_URL             = ec_deployment.this.kibana.https_endpoint
+      ELASTICSEARCH_URL      = ec_deployment.this.elasticsearch.https_endpoint
+      ELASTICSEARCH_PASSWORD = ec_deployment.this.elasticsearch_password
+      ELASTIC_VERSION        = data.ec_stack.latest.version
+      REGION                 = var.region
+      PREFIX                 = var.prefix
+    }
   }
 }
