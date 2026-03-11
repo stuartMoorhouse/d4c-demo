@@ -18,6 +18,81 @@ A privileged pod with `hostPID: true` uses `nsenter` to escape into the host nod
 
 Both scenarios use custom ES|QL detection rules that query `logs-cloud_defend.process-*` to generate alerts in Kibana Security.
 
+## Prerequisites
+
+- [Terraform](https://developer.hashicorp.com/terraform/install) (>= 1.5)
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html) configured with valid credentials
+- An [Elastic Cloud](https://cloud.elastic.co/) account with an API key exported as `EC_API_KEY`
+- `kubectl`, `jq` installed locally
+- SSH access (port 22) not blocked by your network
+
+## Setup
+
+1. Clone the repo and copy the example config:
+
+   ```bash
+   cd infra
+   cp ../terraform.tfvars.example terraform.tfvars
+   ```
+
+2. Edit `terraform.tfvars` to set your preferences:
+
+   ```hcl
+   region        = "eu-north-1"      # AWS region (Elastic Cloud region is derived from this)
+   prefix        = "d4c2"            # Resource name prefix
+   instance_type = "t3.medium"       # EC2 instance type for K8s nodes
+   aws_profile   = "default"         # AWS CLI profile name
+   ```
+
+3. Export your Elastic Cloud API key:
+
+   ```bash
+   export EC_API_KEY="your-elastic-cloud-api-key"
+   ```
+
+## Deploy
+
+```bash
+cd infra
+terraform init
+terraform apply
+```
+
+This single command provisions everything:
+- 3 EC2 instances (1 control plane + 2 workers) running a kubeadm Kubernetes cluster
+- An Elastic Cloud deployment (Elasticsearch + Kibana + Fleet Server)
+- Elastic Agent DaemonSet with the D4C integration on all K8s nodes
+
+## Run the Demo
+
+Once `terraform apply` completes, create the detection rules and run the attacks:
+
+```bash
+# Create the ES|QL detection rules
+./scripts/create-rule.sh           # crypto miner detection (high severity)
+./scripts/create-rule-node.sh      # container breakout detection (critical severity)
+
+# Run both attack simulations
+./scripts/attack.sh                # crypto miner in a container
+./scripts/attack-node.sh           # container breakout via nsenter
+```
+
+Alerts appear in **Kibana > Security > Alerts** within 1-2 minutes.
+
+To reset the demo (clean up alerts and re-run the attacks from a clean state):
+
+```bash
+./scripts/reset-demo.sh
+```
+
+## Teardown
+
+```bash
+./scripts/destroy.sh
+```
+
+This destroys all AWS and Elastic Cloud resources and cleans up local files.
+
 ## Architecture
 
 ```
@@ -32,56 +107,9 @@ Operator Machine
   |           '-- 2 worker nodes
   |                 '-- Elastic Agent DaemonSet (D4C integration)
   |
-  |-- scripts/setup-fleet.sh    -> configures Fleet, deploys agent
-  |-- scripts/create-rule.sh    -> ES|QL rule for crypto miner detection
-  |-- scripts/create-rule-node.sh -> ES|QL rule for container breakout
-  |-- scripts/attack.sh         -> simulates crypto miner in a pod
-  '-- scripts/attack-node.sh    -> simulates container breakout to host
-```
-
-## Prerequisites
-
-- Terraform
-- AWS CLI configured with the `company` profile
-- `EC_API_KEY` environment variable set for Elastic Cloud
-- `jq`, `kubectl` (used by scripts)
-
-## Usage
-
-### Deploy
-
-```bash
-cd infra
-terraform init
-terraform apply
-```
-
-Once infrastructure is up, configure Fleet and deploy the Elastic Agent:
-
-```bash
-./scripts/setup-fleet.sh
-```
-
-### Create Detection Rules
-
-```bash
-./scripts/create-rule.sh       # crypto miner detection
-./scripts/create-rule-node.sh  # container breakout detection
-```
-
-### Run Attack Simulations
-
-```bash
-./scripts/attack.sh            # crypto miner in a container
-./scripts/attack-node.sh       # container breakout via nsenter
-```
-
-Check alerts at **Kibana > Security > Alerts** within 1-2 minutes.
-
-### Teardown
-
-```bash
-./scripts/destroy.sh
+  |-- scripts/create-rule*.sh   -> ES|QL detection rules
+  |-- scripts/attack*.sh        -> attack simulations
+  '-- scripts/reset-demo.sh     -> clean and re-run demo
 ```
 
 ## Key Data Source

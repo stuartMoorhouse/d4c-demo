@@ -10,6 +10,7 @@ ES_PASSWORD="${ELASTICSEARCH_PASSWORD:-$(terraform -chdir="${PROJECT_DIR}/infra"
 ES_VERSION="${ELASTIC_VERSION:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elastic_version)}"
 REGION="${REGION:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw region 2>/dev/null || echo "eu-north-1")}"
 PREFIX="${PREFIX:-$(terraform -chdir="${PROJECT_DIR}/infra" output -raw prefix 2>/dev/null || echo "d4c2")}"
+AWS_PROFILE="${AWS_PROFILE:-default}"
 
 # Fetch kubeconfig from SSM
 echo "Fetching kubeconfig from SSM..."
@@ -18,7 +19,7 @@ aws ssm get-parameter \
   --name "/${PREFIX}/kubeconfig" \
   --with-decryption \
   --region "$REGION" \
-  --profile company \
+  --profile "$AWS_PROFILE" \
   --query 'Parameter.Value' \
   --output text > "$KUBECONFIG_FILE"
 export KUBECONFIG="$KUBECONFIG_FILE"

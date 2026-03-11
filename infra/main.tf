@@ -22,7 +22,7 @@ terraform {
 
 provider "aws" {
   region  = var.region
-  profile = "company"
+  profile = var.aws_profile
 
   default_tags {
     tags = var.aws_tags
@@ -58,7 +58,7 @@ data "aws_ami" "ubuntu" {
 
 data "ec_stack" "latest" {
   version_regex = "9\\.3\\.\\d+"
-  region        = "aws-eu-north-1"
+  region        = "aws-${var.region}"
 }
 
 # ---------- SSH Key ----------
@@ -278,8 +278,8 @@ resource "aws_instance" "worker" {
 # ---------- Elastic Cloud ----------
 
 resource "ec_deployment" "this" {
-  name                   = "d4c-test"
-  region                 = "aws-eu-north-1"
+  name                   = "${var.prefix}-elastic"
+  region                 = "aws-${var.region}"
   version                = data.ec_stack.latest.version
   deployment_template_id = "aws-general-purpose-faster-warm"
 
@@ -331,7 +331,7 @@ resource "null_resource" "wait_for_cluster" {
           --name "/${var.prefix}/kubeconfig" \
           --with-decryption \
           --region ${var.region} \
-          --profile company \
+          --profile ${var.aws_profile} \
           --query 'Parameter.Value' \
           --output text 2>/dev/null || echo "pending")
         if [[ "$KUBECONFIG_VAL" != "pending" && -n "$KUBECONFIG_VAL" ]]; then
@@ -381,6 +381,7 @@ resource "null_resource" "wait_for_cluster" {
       ELASTIC_VERSION        = data.ec_stack.latest.version
       REGION                 = var.region
       PREFIX                 = var.prefix
+      AWS_PROFILE            = var.aws_profile
     }
   }
 }

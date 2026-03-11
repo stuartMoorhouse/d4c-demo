@@ -4,6 +4,12 @@ variable "region" {
   default     = "eu-north-1"
 }
 
+variable "aws_profile" {
+  description = "AWS CLI profile name"
+  type        = string
+  default     = "default"
+}
+
 variable "prefix" {
   description = "Resource name prefix"
   type        = string
