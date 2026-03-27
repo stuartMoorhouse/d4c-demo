@@ -65,25 +65,51 @@ This single command provisions everything:
 
 ## Run the Demo
 
-Once `terraform apply` completes, create the detection rules and run the attacks:
+All scripts should be run from the project root directory.
+
+### First-time setup: create detection rules
+
+After `terraform apply` completes, create the detection rules that will fire on the attack telemetry:
 
 ```bash
-# Create the ES|QL detection rules
-./scripts/create-rule.sh           # crypto miner detection (high severity)
-./scripts/create-rule-node.sh      # container breakout detection (critical severity)
-
-# Run both attack simulations
-./scripts/attack.sh                # crypto miner in a container
-./scripts/attack-node.sh           # container breakout via nsenter
+./scripts/create-crypto-miner-rule.sh           # ES|QL: crypto miner detection (high severity)
+./scripts/create-breakout-detection-rule.sh      # ES|QL: container breakout detection (critical severity)
+./scripts/create-confirmed-escape-rule.sh        # EQL sequence: confirmed escape + host compromise (critical)
 ```
 
-Alerts appear in **Kibana > Security > Alerts** within 1-2 minutes.
+You only need to do this once per deployment.
 
-To reset the demo (clean up alerts and re-run the attacks from a clean state):
+### Run the attacks
+
+```bash
+# Deploys both attacks (crypto miner + container breakout) and reports expected alerts
+./scripts/attack.sh
+```
+
+To reset alerts and re-run the full cycle:
 
 ```bash
 ./scripts/reset-demo.sh
 ```
+
+This cleans up any previous alerts and jobs, re-runs the container breakout attack, and waits until 2 alerts appear in Kibana (typically under 2 minutes).
+
+### Check results
+
+Open **Kibana > Security > Alerts** (the URL is printed by each script). You should see:
+
+- **Container Breakout via nsenter** -- critical severity
+- **Sensitive File Access from Container** -- high severity (from the `/etc/shadow` read)
+
+### Re-run the demo
+
+To reset everything and run a clean demo again:
+
+```bash
+./scripts/reset-demo.sh
+```
+
+This disables rules, deletes existing alerts and cases, re-enables rules (resetting suppression windows), runs the attack, and verifies alerts appear.
 
 ## Teardown
 
@@ -107,8 +133,8 @@ Operator Machine
   |           '-- 2 worker nodes
   |                 '-- Elastic Agent DaemonSet (D4C integration)
   |
-  |-- scripts/create-rule*.sh   -> ES|QL detection rules
-  |-- scripts/attack*.sh        -> attack simulations
+  |-- scripts/create-*-rule.sh  -> ES|QL detection rules
+  |-- scripts/attack.sh          -> both attack simulations
   '-- scripts/reset-demo.sh     -> clean and re-run demo
 ```
 

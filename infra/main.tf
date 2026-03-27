@@ -101,6 +101,95 @@ resource "aws_subnet" "public" {
   tags = { Name = "${var.prefix}-public" }
 }
 
+# Clean up all AWS-managed resources that block VPC/subnet deletion.
+# GuardDuty auto-creates VPC endpoints + security groups; K8s networking
+# can leave orphaned ENIs. All must be removed before Terraform can delete
+# the VPC and subnet.
+resource "null_resource" "vpc_cleanup" {
+  triggers = {
+    vpc_id    = aws_vpc.this.id
+    subnet_id = aws_subnet.public.id
+    region    = var.region
+    profile   = var.aws_profile
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      set -e
+      REGION="${self.triggers.region}"
+      PROFILE="${self.triggers.profile}"
+      VPC="${self.triggers.vpc_id}"
+      SUBNET="${self.triggers.subnet_id}"
+      AWS="aws --region $REGION --profile $PROFILE"
+
+      # --- 1. Delete ALL VPC endpoints (not just GuardDuty) ---
+      echo "Cleaning up VPC endpoints..."
+      ENDPOINTS=$($AWS ec2 describe-vpc-endpoints \
+        --filters "Name=vpc-id,Values=$VPC" \
+        --query 'VpcEndpoints[].VpcEndpointId' \
+        --output text 2>/dev/null || true)
+      if [ -n "$ENDPOINTS" ] && [ "$ENDPOINTS" != "None" ]; then
+        echo "Deleting VPC endpoints: $ENDPOINTS"
+        $AWS ec2 delete-vpc-endpoints --vpc-endpoint-ids $ENDPOINTS || true
+      fi
+
+      # --- 2. Detach and delete all non-Terraform ENIs in the subnet ---
+      echo "Cleaning up orphaned ENIs..."
+      for eni in $($AWS ec2 describe-network-interfaces \
+        --filters "Name=subnet-id,Values=$SUBNET" \
+        --query 'NetworkInterfaces[].NetworkInterfaceId' \
+        --output text 2>/dev/null); do
+        [ "$eni" = "None" ] && continue
+        echo "  Processing ENI: $eni"
+        attachment=$($AWS ec2 describe-network-interfaces \
+          --network-interface-ids "$eni" \
+          --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null)
+        if [ -n "$attachment" ] && [ "$attachment" != "None" ]; then
+          $AWS ec2 detach-network-interface --attachment-id "$attachment" --force || true
+          sleep 3
+        fi
+        $AWS ec2 delete-network-interface --network-interface-id "$eni" || true
+      done
+
+      # --- 3. Wait for endpoint ENIs to fully release ---
+      if [ -n "$ENDPOINTS" ] && [ "$ENDPOINTS" != "None" ]; then
+        echo "Waiting for endpoint ENI release..."
+        for i in $(seq 1 12); do
+          REMAINING=$($AWS ec2 describe-vpc-endpoints \
+            --vpc-endpoint-ids $ENDPOINTS \
+            --query 'VpcEndpoints[?State!=`deleted`].VpcEndpointId' \
+            --output text 2>/dev/null || true)
+          if [ -z "$REMAINING" ] || [ "$REMAINING" = "None" ]; then
+            echo "  All endpoints deleted"
+            break
+          fi
+          echo "  Waiting for endpoints to finish deleting... (attempt $i/12)"
+          sleep 5
+        done
+      fi
+
+      # --- 4. Delete non-default security groups with retry ---
+      echo "Cleaning up non-default security groups..."
+      for attempt in 1 2 3; do
+        NON_DEFAULT_SGS=$($AWS ec2 describe-security-groups \
+          --filters "Name=vpc-id,Values=$VPC" \
+          --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
+          --output text 2>/dev/null || true)
+        if [ -z "$NON_DEFAULT_SGS" ] || [ "$NON_DEFAULT_SGS" = "None" ]; then
+          echo "  No non-default security groups remain"
+          break
+        fi
+        for sg in $NON_DEFAULT_SGS; do
+          echo "  Deleting security group: $sg (attempt $attempt)"
+          $AWS ec2 delete-security-group --group-id "$sg" 2>/dev/null || true
+        done
+        [ "$attempt" -lt 3 ] && sleep 10
+      done
+    EOT
+  }
+}
+
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
   tags   = { Name = "${var.prefix}-igw" }
@@ -243,6 +332,10 @@ resource "aws_instance" "control" {
     pod_cidr       = "10.244.0.0/16"
   })
 
+  metadata_options {
+    http_tokens = "required"
+  }
+
   root_block_device {
     volume_size = 30
     volume_type = "gp3"
@@ -266,6 +359,10 @@ resource "aws_instance" "worker" {
     region           = var.region
     control_plane_ip = aws_instance.control.private_ip
   })
+
+  metadata_options {
+    http_tokens = "required"
+  }
 
   root_block_device {
     volume_size = 30
