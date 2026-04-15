@@ -331,6 +331,7 @@ resource "aws_instance" "control" {
     region         = var.region
     pod_cidr       = "10.244.0.0/16"
   })
+  user_data_replace_on_change = true
 
   metadata_options {
     http_tokens = "required"
@@ -359,6 +360,7 @@ resource "aws_instance" "worker" {
     region           = var.region
     control_plane_ip = aws_instance.control.private_ip
   })
+  user_data_replace_on_change = true
 
   metadata_options {
     http_tokens = "required"

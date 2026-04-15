@@ -46,7 +46,15 @@ apt-mark hold kubelet kubeadm kubectl
 
 # Init control plane
 PRIVATE_IP=$(hostname -I | awk '{print $1}')
-PUBLIC_IP=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4)
+IMDS_TOKEN=$(curl -sS --max-time 5 -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PUBLIC_IP=$(curl -sS --max-time 5 \
+  -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  http://169.254.169.254/latest/meta-data/public-ipv4)
+if [[ -z "$PUBLIC_IP" ]]; then
+  echo "FATAL: Failed to retrieve public IP from IMDSv2"
+  exit 1
+fi
 kubeadm init \
   --pod-network-cidr=${pod_cidr} \
   --apiserver-advertise-address="$PRIVATE_IP" \
