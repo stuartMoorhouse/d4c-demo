@@ -62,22 +62,11 @@ This single command provisions everything:
 - 3 EC2 instances (1 control plane + 2 workers) running a kubeadm Kubernetes cluster
 - An Elastic Cloud deployment (Elasticsearch + Kibana + Fleet Server)
 - Elastic Agent DaemonSet with the D4C integration on all K8s nodes
+- Detection rules (crypto miner, container breakout) registered and enabled in Kibana
 
 ## Run the Demo
 
 All scripts should be run from the project root directory.
-
-### First-time setup: create detection rules
-
-After `terraform apply` completes, create the detection rules that will fire on the attack telemetry:
-
-```bash
-./scripts/create-crypto-miner-rule.sh           # ES|QL: crypto miner detection (high severity)
-./scripts/create-breakout-detection-rule.sh      # ES|QL: container breakout detection (critical severity)
-./scripts/create-confirmed-escape-rule.sh        # EQL sequence: confirmed escape + host compromise (critical)
-```
-
-You only need to do this once per deployment.
 
 ### Run the attacks
 

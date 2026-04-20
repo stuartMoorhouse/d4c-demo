@@ -1,11 +1,27 @@
-#!/bin/bash -xe
-# Create and enable an ES|QL detection rule for crypto miner (xmrig)
+#!/bin/bash
+# Create and enable an ES|QL detection rule for crypto miner (xmrig).
+# Idempotent: if a rule with the same rule_id already exists, this is a no-op.
+
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-KIBANA_URL=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw kibana_url)
-ES_PASSWORD=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elasticsearch_password)
+: "${KIBANA_URL:=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw kibana_url)}"
+: "${ES_PASSWORD:=$(terraform -chdir="${PROJECT_DIR}/infra" output -raw elasticsearch_password)}"
+
+RULE_ID="d4c2-crypto-miner"
+
+EXISTING=$(curl -s -o /dev/null -w "%{http_code}" \
+  -u "elastic:${ES_PASSWORD}" \
+  -H "kbn-xsrf: true" \
+  -H "elastic-api-version: 2023-10-31" \
+  "${KIBANA_URL}/api/detection_engine/rules?rule_id=${RULE_ID}")
+
+if [[ "$EXISTING" == "200" ]]; then
+  echo "Crypto miner rule (rule_id=${RULE_ID}) already exists — skipping."
+  exit 0
+fi
 
 echo "Creating crypto miner detection rule..."
 
@@ -15,6 +31,7 @@ RULE_RESPONSE=$(curl -s -X POST "${KIBANA_URL}/api/detection_engine/rules" \
   -H "elastic-api-version: 2023-10-31" \
   -u "elastic:${ES_PASSWORD}" \
   -d '{
+    "rule_id": "'"${RULE_ID}"'",
     "type": "esql",
     "language": "esql",
     "name": "Crypto Miner Detected (xmrig in /tmp)",
@@ -36,22 +53,12 @@ RULE_RESPONSE=$(curl -s -X POST "${KIBANA_URL}/api/detection_engine/rules" \
     }
   }')
 
-RULE_ID=$(echo "$RULE_RESPONSE" | jq -r '.id')
+ID=$(echo "$RULE_RESPONSE" | jq -r '.id')
 
-if [[ -z "$RULE_ID" || "$RULE_ID" == "null" ]]; then
+if [[ -z "$ID" || "$ID" == "null" ]]; then
   echo "ERROR: Failed to create detection rule"
   echo "$RULE_RESPONSE" | jq .
   exit 1
 fi
 
-echo ""
-echo "====================================="
-echo " Detection rule created and enabled"
-echo "====================================="
-echo ""
-echo "Rule ID:    $RULE_ID"
-echo "Interval:   5 seconds"
-echo "Suppression: host.name for 10 minutes"
-echo ""
-echo "View rule: ${KIBANA_URL}/app/security/rules/id/${RULE_ID}"
-echo "Alerts:    ${KIBANA_URL}/app/security/alerts"
+echo "Crypto miner rule created: ${KIBANA_URL}/app/security/rules/id/${ID}"

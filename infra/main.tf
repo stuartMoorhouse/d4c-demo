@@ -484,3 +484,38 @@ resource "null_resource" "wait_for_cluster" {
     }
   }
 }
+
+resource "null_resource" "update_local_kubeconfig" {
+  depends_on = [null_resource.wait_for_cluster]
+
+  triggers = {
+    control_id = aws_instance.control.id
+  }
+
+  provisioner "local-exec" {
+    command = "bash ${path.module}/../scripts/get-kubeconfig.sh"
+  }
+}
+
+resource "null_resource" "detection_rules" {
+  depends_on = [null_resource.wait_for_cluster]
+
+  triggers = {
+    elastic_id           = ec_deployment.this.id
+    crypto_script_hash   = filesha256("${path.module}/../scripts/create-crypto-miner-rule.sh")
+    breakout_script_hash = filesha256("${path.module}/../scripts/create-breakout-detection-rule.sh")
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      bash ${path.module}/../scripts/create-crypto-miner-rule.sh
+      bash ${path.module}/../scripts/create-breakout-detection-rule.sh
+    EOT
+
+    environment = {
+      KIBANA_URL  = ec_deployment.this.kibana.https_endpoint
+      ES_PASSWORD = ec_deployment.this.elasticsearch_password
+    }
+  }
+}
