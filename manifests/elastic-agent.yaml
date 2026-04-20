@@ -63,6 +63,7 @@ spec:
           image: docker.elastic.co/elastic-agent/elastic-agent:ELASTIC_VERSION_PLACEHOLDER
           securityContext:
             privileged: true
+            readOnlyRootFilesystem: true
           env:
             - name: FLEET_URL
               value: "FLEET_URL_PLACEHOLDER"
